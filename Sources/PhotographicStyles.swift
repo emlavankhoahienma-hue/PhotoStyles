@@ -377,7 +377,7 @@ final class StyleMotion: ObservableObject {
 
     func touchMoved(to p: SIMD2<Double>) {
         var q = p
-        if abs(q.x) < 0.04 && abs(q.y) < 0.04 { q = SIMD2(0, 0) }
+        if abs(q.x) < 0.04 && abs(q.y) < 0.04 { q = SIMD2(0, 0) }     // detent ở tâm
         let cell = Self.cellIndex(q)
         if cell != lastCell {
             lastCell = cell
@@ -469,17 +469,17 @@ enum StylePreset: String, CaseIterable, Identifiable {
 
     var look: Look {
         switch self {
-        case .standard: return Look()
+        case .standard:     return Look()
         case .richContrast: return Look(tone: 0.45, color: 0.25)
-        case .vibrant: return Look(tone: 0.10, color: 0.65)
-        case .warm: return Look(tone: 0.05, color: 0.10, padX: 0.20, padY: 0.55)
-        case .cool: return Look(tone: 0.05, color: 0.05, padX: -0.20, padY: -0.55)
-        case .cozy: return Look(tone: -0.10, color: 0.00, padX: 0.35, padY: 0.35, blackLift: 0.02)
-        case .dramatic: return Look(tone: 0.75, color: -0.15, padX: 0.0, padY: -0.15)
-        case .quiet: return Look(tone: -0.30, color: -0.40, padX: -0.10, padY: 0.0, blackLift: 0.04)
-        case .ethereal: return Look(tone: -0.55, color: -0.15, padX: -0.10, padY: -0.20, blackLift: 0.06)
-        case .mutedBW: return Look(tone: -0.20, blackLift: 0.03, mono: true)
-        case .starkBW: return Look(tone: 0.85, mono: true)
+        case .vibrant:      return Look(tone: 0.10, color: 0.65)
+        case .warm:         return Look(tone: 0.05, color: 0.10, padX: 0.20, padY: 0.55)
+        case .cool:         return Look(tone: 0.05, color: 0.05, padX: -0.20, padY: -0.55)
+        case .cozy:         return Look(tone: -0.10, color: 0.00, padX: 0.35, padY: 0.35, blackLift: 0.02)
+        case .dramatic:     return Look(tone: 0.75, color: -0.15, padX: 0.0, padY: -0.15)
+        case .quiet:        return Look(tone: -0.30, color: -0.40, padX: -0.10, padY: 0.0, blackLift: 0.04)
+        case .ethereal:     return Look(tone: -0.55, color: -0.15, padX: -0.10, padY: -0.20, blackLift: 0.06)
+        case .mutedBW:      return Look(tone: -0.20, blackLift: 0.03, mono: true)
+        case .starkBW:      return Look(tone: 0.85, mono: true)
         }
     }
 }
@@ -557,7 +557,7 @@ struct StylePadView: View {
                             let s = cell * CGFloat(0.5 + 0.42 * near)
                             let r = CGRect(x: cx - s / 2, y: cy - s / 2, width: s, height: s)
                             ctx.fill(Path(roundedRect: r, cornerRadius: s * 0.34, style: .continuous),
-                                      with: .color(StylePadColors.cells[j * n + i]))
+                                     with: .color(StylePadColors.cells[j * n + i]))
                         }
                     }
                 }
@@ -642,7 +642,7 @@ struct StylePanel: View {
             Text(title).font(.footnote).frame(width: 36, alignment: .leading)
             Slider(value: Binding(get: { value.wrappedValue },
                                   set: { value.wrappedValue = abs($0) < 0.03 ? 0 : $0 }),   // detent ở 0
-                    in: -1...1)
+                   in: -1...1)
             Text("\(Int((value.wrappedValue * 100).rounded()))")
                 .font(.footnote.monospacedDigit())
                 .frame(width: 36, alignment: .trailing)
@@ -653,6 +653,7 @@ struct StylePanel: View {
 
 // MARK: - Preview Metal (Core Image → CAMetalLayer)
 
+/// Render nằm ngoài UIView để gọi được từ queue camera (UIView bị khoá vào main actor).
 final class PreviewRenderer {
     let metalLayer: CAMetalLayer
     private let engine: StyleEngine
@@ -797,7 +798,7 @@ final class StyleCamera: NSObject, ObservableObject {
     }
 
     func capture() {
-        let params = engine.currentParams
+        let params = engine.currentParams              // chốt style đúng lúc bấm nút chụp
         sessionQueue.async { [weak self] in
             guard let self = self, self.session.isRunning else { return }
             let settings = self.photoOutput.availablePhotoCodecTypes.contains(.hevc)
@@ -811,100 +812,110 @@ final class StyleCamera: NSObject, ObservableObject {
             self.photoOutput.capturePhoto(with: settings, delegate: self)
         }
     }
+
+    /// Áp LUT 65³ lên ảnh gốc (Core Image tự chia tile → 12MP hay 48MP đều không tốn RAM thêm), lưu HEIF 10-bit.
+    private func styleAndSave(_ data: Data, params p: StyleParams) {
+        autoreleasepool {
+            guard let src = CIImage(data: data) else { return }     // giữ nguyên orientation tag + EXIF
+            var out = src
+            if !p.isIdentity {
+                let cube = LUTBuilder.build(p, dimension: StyleEngine.stillDimension)
+                out = src.applyingFilter("CIColorCubeWithColorSpace", parameters: [
+                    "inputCubeDimension": StyleEngine.stillDimension,
+                    "inputCubeData": cube,
+                    "inputColorSpace": ColorMath.displayP3
+                ]).settingProperties(src.properties)
+            }
+            let cs = ColorMath.displayP3
+            var file: Data? = try? Self.stillContext.heif10Representation(of: out, colorSpace: cs, options: [:])
+            if file == nil {
+                file = Self.stillContext.heifRepresentation(
+                    of: out, format: .RGBA8, colorSpace: cs,
+                    options: [CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.95])
+            }
+            guard let bytes = file else { return }
+            PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+                guard status == .authorized || status == .limited else { return }
+                PHPhotoLibrary.shared().performChanges({
+                    PHAssetCreationRequest.forAsset().addResource(with: .photo, data: bytes, options: nil)
+                }, completionHandler: nil)
+            }
+        }
+    }
 }
 
-// Conform to AVCapture delegates
 extension StyleCamera: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        guard let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        preview?.render(buffer)
+        guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        preview?.render(pb)
     }
 }
 
 extension StyleCamera: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
-        // Placeholder: handle captured photo if needed
+        guard error == nil, let data = photo.fileDataRepresentation() else { return }
+        let id = photo.resolvedSettings.uniqueID
+        pendingLock.lock()
+        let p = pending.removeValue(forKey: id) ?? StyleParams()
+        pendingLock.unlock()
+        processQueue.async { [weak self] in self?.styleAndSave(data, params: p) }
     }
 }
 
+// MARK: - Màn hình demo
 
-final class StyleCamera: NSObject, ObservableObject {
-    let engine = StyleEngine()
-    weak var preview: PreviewRenderer?
+struct PhotographicStylesDemoView: View {
+    @StateObject private var camera: StyleCamera
+    @StateObject private var style: StyleController
+    @State private var showStyles = true
 
-    private let session = AVCaptureSession()
-    private let videoOutput = AVCaptureVideoDataOutput()
-    private let photoOutput = AVCapturePhotoOutput()
-    private let sessionQueue = DispatchQueue(label: "style.session")
-    private let videoQueue = DispatchQueue(label: "style.video", qos: .userInitiated)
-    private let processQueue = DispatchQueue(label: "style.process", qos: .userInitiated)
-    private static let stillContext = CIContext(options: [.cacheIntermediates: false])
-    private var configured = false
-    private var pending: [Int64: StyleParams] = [:]
-    private let pendingLock = NSLock()
+    init() {
+        let cam = StyleCamera()
+        _camera = StateObject(wrappedValue: cam)
+        _style = StateObject(wrappedValue: StyleController(engine: cam.engine))
+    }
 
-    func start() {
-        AVCaptureDevice.requestAccess(for: .video) { [weak self] ok in
-            guard ok, let self = self else { return }
-            self.sessionQueue.async {
-                self.configure()
-                if !self.session.isRunning { self.session.startRunning() }
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            StyledPreview(camera: camera)
+                .ignoresSafeArea()
+
+            VStack(spacing: 16) {
+                if showStyles {
+                    StylePanel(style: style)
+                        .padding(18)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 30, style: .continuous))
+                        .padding(.horizontal, 12)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+                HStack(spacing: 44) {
+                    Button {
+                        withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) { showStyles.toggle() }
+                    } label: {
+                        Image(systemName: "camera.filters")
+                            .font(.title2)
+                            .foregroundColor(.white)
+                            .frame(width: 52, height: 52)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
+                    Button { camera.capture() } label: {
+                        Circle()
+                            .fill(Color.white)
+                            .frame(width: 68, height: 68)
+                            .overlay(Circle().stroke(Color.white, lineWidth: 3).padding(-6))
+                    }
+                    Color.clear.frame(width: 52, height: 52)
+                }
             }
+            .padding(.bottom, 12)
         }
-    }
-
-    func stop() {
-        sessionQueue.async { [weak self] in
-            if self?.session.isRunning == true { self?.session.stopRunning() }
-        }
-    }
-
-    private static func portrait(_ c: AVCaptureConnection) {
-        if #available(iOS 17.0, *) {
-            if c.isVideoRotationAngleSupported(90) { c.videoRotationAngle = 90 }
-        } else if c.isVideoOrientationSupported {
-            c.videoOrientation = .portrait
-        }
-    }
-
-    private func configure() {
-        guard !configured else { return }
-        session.beginConfiguration()
-        session.sessionPreset = .photo
-        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
-              let input = try? AVCaptureDeviceInput(device: device),
-              session.canAddInput(input) else {
-            session.commitConfiguration()
-            return
-        }
-        session.addInput(input)
-
-        videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
-        videoOutput.alwaysDiscardsLateVideoFrames = true
-        videoOutput.setSampleBufferDelegate(self, queue: videoQueue)
-        if session.canAddOutput(videoOutput) { session.addOutput(videoOutput) }
-        if session.canAddOutput(photoOutput) {
-            session.addOutput(photoOutput)
-            photoOutput.maxPhotoQualityPrioritization = .quality
-        }
-        if let c = videoOutput.connection(with: .video) { Self.portrait(c) }
-        session.commitConfiguration()
-        configured = true
-    }
-
-    func capture() {
-        let params = engine.currentParams
-        sessionQueue.async { [weak self] in
-            guard let self = self, self.session.isRunning else { return }
-            let settings = self.photoOutput.availablePhotoCodecTypes.contains(.hevc)
-                ? AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
-                : AVCapturePhotoSettings()
-            settings.photoQualityPrioritization = .quality
-            if let c = self.photoOutput.connection(with: .video) { Self.portrait(c) }
-            self.pendingLock.lock()
-            self.pending[settings.uniqueID] = params
-            self.pendingLock.unlock()
-            self.photoOutput.capturePhoto(with: settings, delegate: self)
-        }
+        .background(Color.black)
+        .onAppear { camera.start() }
+        .onDisappear { camera.stop() }
     }
 }
+
+// @main
+// struct DemoApp: App {
+//     var body: some Scene { WindowGroup { PhotographicStylesDemoView().preferredColorScheme(.dark) } }
+// }
