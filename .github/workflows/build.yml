@@ -8,7 +8,7 @@ jobs:
   build:
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Cài XcodeGen
         run: brew install xcodegen
@@ -18,11 +18,15 @@ jobs:
 
       - name: Build (không ký)
         run: |
+          set +e
           xcodebuild -project PhotoStyles.xcodeproj -scheme PhotoStyles \
             -configuration Release -sdk iphoneos \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            clean build
+            clean build > build.log 2>&1
+          STATUS=$?
+          grep -E "error:" build.log | sed 's#/Users/runner/work/PhotoStyles/PhotoStyles/##' | sort -u | head -10 | while IFS= read -r line; do echo "::error::$line"; done
+          exit $STATUS
 
       - name: Đóng gói IPA
         run: |
@@ -34,3 +38,10 @@ jobs:
         with:
           name: PhotoStyles-ipa
           path: PhotoStyles.ipa
+
+      - name: Lưu log build
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log

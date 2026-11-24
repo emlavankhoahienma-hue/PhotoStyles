@@ -336,12 +336,17 @@ struct Spring2 {
     }
 }
 
+@MainActor
 private final class DisplayLinkProxy: NSObject {
     weak var owner: StyleMotion?
     init(_ owner: StyleMotion) { self.owner = owner }
-    @objc func tick(_ link: CADisplayLink) { owner?.step(link) }
+    @objc func tick(_ link: CADisplayLink) {
+        guard let owner = owner else { link.invalidate(); return }
+        owner.step(link)
+    }
 }
 
+@MainActor
 final class StyleMotion: ObservableObject {
     static let n = 11                                             // bảng 11 × 11
 
@@ -361,8 +366,6 @@ final class StyleMotion: ObservableObject {
     private let selection = UISelectionFeedbackGenerator()
     private let impact = UIImpactFeedbackGenerator(style: .rigid)
 
-    deinit { link?.invalidate() }
-
     // --- Cử chỉ ---
     func touchBegan() {
         guard !isDown else { return }
@@ -374,7 +377,7 @@ final class StyleMotion: ObservableObject {
 
     func touchMoved(to p: SIMD2<Double>) {
         var q = p
-        if abs(q.x) < 0.04 && abs(q.y) < 0.04 { q = SIMD2(0, 0) }     // detent ở tâm
+        if abs(q.x) < 0.04 && abs(q.y) < 0.04 { q = SIMD2(0, 0) }
         let cell = Self.cellIndex(q)
         if cell != lastCell {
             lastCell = cell
@@ -466,23 +469,24 @@ enum StylePreset: String, CaseIterable, Identifiable {
 
     var look: Look {
         switch self {
-        case .standard:     return Look()
+        case .standard: return Look()
         case .richContrast: return Look(tone: 0.45, color: 0.25)
-        case .vibrant:      return Look(tone: 0.10, color: 0.65)
-        case .warm:         return Look(tone: 0.05, color: 0.10, padX: 0.20, padY: 0.55)
-        case .cool:         return Look(tone: 0.05, color: 0.05, padX: -0.20, padY: -0.55)
-        case .cozy:         return Look(tone: -0.10, color: 0.00, padX: 0.35, padY: 0.35, blackLift: 0.02)
-        case .dramatic:     return Look(tone: 0.75, color: -0.15, padX: 0.0, padY: -0.15)
-        case .quiet:        return Look(tone: -0.30, color: -0.40, padX: -0.10, padY: 0.0, blackLift: 0.04)
-        case .ethereal:     return Look(tone: -0.55, color: -0.15, padX: -0.10, padY: -0.20, blackLift: 0.06)
-        case .mutedBW:      return Look(tone: -0.20, blackLift: 0.03, mono: true)
-        case .starkBW:      return Look(tone: 0.85, mono: true)
+        case .vibrant: return Look(tone: 0.10, color: 0.65)
+        case .warm: return Look(tone: 0.05, color: 0.10, padX: 0.20, padY: 0.55)
+        case .cool: return Look(tone: 0.05, color: 0.05, padX: -0.20, padY: -0.55)
+        case .cozy: return Look(tone: -0.10, color: 0.00, padX: 0.35, padY: 0.35, blackLift: 0.02)
+        case .dramatic: return Look(tone: 0.75, color: -0.15, padX: 0.0, padY: -0.15)
+        case .quiet: return Look(tone: -0.30, color: -0.40, padX: -0.10, padY: 0.0, blackLift: 0.04)
+        case .ethereal: return Look(tone: -0.55, color: -0.15, padX: -0.10, padY: -0.20, blackLift: 0.06)
+        case .mutedBW: return Look(tone: -0.20, blackLift: 0.03, mono: true)
+        case .starkBW: return Look(tone: 0.85, mono: true)
         }
     }
 }
 
 // MARK: - Controller
 
+@MainActor
 final class StyleController: ObservableObject {
     let motion = StyleMotion()
     @Published private(set) var preset: StylePreset = .standard
@@ -524,7 +528,7 @@ enum StylePadColors {
         return Color(.displayP3, red: c.x, green: c.y, blue: c.z, opacity: 1)
     }
 
-    static let cells: [Color] = (0..< (n * n)).map { idx in
+    static let cells: [Color] = (0..<(n * n)).map { idx in
         let i = idx % n, j = idx / n
         return color(u: Double(i) / Double(n - 1) * 2 - 1, v: 1 - Double(j) / Double(n - 1) * 2)
     }
@@ -548,7 +552,7 @@ struct StylePadView: View {
                             let cx = (CGFloat(i) + 0.5) * cell
                             let cy = (CGFloat(j) + 0.5) * cell
                             let d = Double(hypot(cx - pc.x, cy - pc.y) / cell)
-                            // ô gần con trỏ phỉnh ra (Gaussian), mạnh hơn khi đang chạm
+                            // ô gần con trỏ phình ra (Gaussian), mạnh hơn khi đang chạm
                             let near = exp(-d * d / 2.4) * (0.3 + 0.7 * model.touch)
                             let s = cell * CGFloat(0.5 + 0.42 * near)
                             let r = CGRect(x: cx - s / 2, y: cy - s / 2, width: s, height: s)
@@ -649,45 +653,32 @@ struct StylePanel: View {
 
 // MARK: - Preview Metal (Core Image → CAMetalLayer)
 
-final class MetalPreviewView: UIView {
-    override class var layerClass: AnyClass { CAMetalLayer.self }
-
-    private var mlayer: CAMetalLayer!
+final class PreviewRenderer {
+    let metalLayer: CAMetalLayer
     private let engine: StyleEngine
     private let queue: MTLCommandQueue
     private let ciContext: CIContext
     private let cube = StyleCubeFilter()
 
-    init(engine: StyleEngine) {
+    init(layer: CAMetalLayer, engine: StyleEngine) {
         self.engine = engine
         let device = MTLCreateSystemDefaultDevice()!
         let q = device.makeCommandQueue()!
         queue = q
         ciContext = CIContext(mtlCommandQueue: q, options: [.cacheIntermediates: false])
-        super.init(frame: .zero)
-        mlayer = layer as? CAMetalLayer
-        mlayer.device = device
-        mlayer.pixelFormat = .bgra8Unorm
-        mlayer.framebufferOnly = false
-        mlayer.colorspace = ColorMath.displayP3
-        backgroundColor = .black
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        let s = window?.screen.scale ?? UIScreen.main.scale
-        mlayer.contentsScale = s
-        mlayer.drawableSize = CGSize(width: bounds.width * s, height: bounds.height * s)
+        metalLayer = layer
+        layer.device = device
+        layer.pixelFormat = .bgra8Unorm
+        layer.framebufferOnly = false
+        layer.colorspace = ColorMath.displayP3
     }
 
     /// Gọi từ queue camera cho từng khung hình.
     func render(_ buffer: CVPixelBuffer) {
         autoreleasepool {
-            let size = mlayer.drawableSize
+            let size = metalLayer.drawableSize
             guard size.width > 0, size.height > 0,
-                  let drawable = mlayer.nextDrawable(),
+                  let drawable = metalLayer.nextDrawable(),
                   let cb = queue.makeCommandBuffer() else { return }
 
             var image = cube.apply(CIImage(cvPixelBuffer: buffer), engine: engine)
@@ -709,11 +700,31 @@ final class MetalPreviewView: UIView {
     }
 }
 
+final class MetalPreviewView: UIView {
+    override class var layerClass: AnyClass { CAMetalLayer.self }
+    private(set) var renderer: PreviewRenderer!
+
+    init(engine: StyleEngine) {
+        super.init(frame: .zero)
+        backgroundColor = .black
+        renderer = PreviewRenderer(layer: layer as! CAMetalLayer, engine: engine)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let s = traitCollection.displayScale > 0 ? traitCollection.displayScale : 3
+        renderer.metalLayer.contentsScale = s
+        renderer.metalLayer.drawableSize = CGSize(width: bounds.width * s, height: bounds.height * s)
+    }
+}
+
 struct StyledPreview: UIViewRepresentable {
     let camera: StyleCamera
     func makeUIView(context: Context) -> MetalPreviewView {
         let v = MetalPreviewView(engine: camera.engine)
-        camera.preview = v
+        camera.preview = v.renderer
         return v
     }
     func updateUIView(_ uiView: MetalPreviewView, context: Context) {}
@@ -723,7 +734,7 @@ struct StyledPreview: UIViewRepresentable {
 
 final class StyleCamera: NSObject, ObservableObject {
     let engine = StyleEngine()
-    weak var preview: MetalPreviewView?
+    weak var preview: PreviewRenderer?
 
     private let session = AVCaptureSession()
     private let videoOutput = AVCaptureVideoDataOutput()
@@ -786,7 +797,7 @@ final class StyleCamera: NSObject, ObservableObject {
     }
 
     func capture() {
-        let params = engine.currentParams              // chốt style đúng lúc bấm nút chụp
+        let params = engine.currentParams
         sessionQueue.async { [weak self] in
             guard let self = self, self.session.isRunning else { return }
             let settings = self.photoOutput.availablePhotoCodecTypes.contains(.hevc)
@@ -801,4 +812,3 @@ final class StyleCamera: NSObject, ObservableObject {
         }
     }
 }
-
