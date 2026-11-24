@@ -1,0 +1,24 @@
+name: PhotoStyles
+options:
+  bundleIdPrefix: com.anhkhoa
+  deploymentTarget:
+    iOS: "15.0"
+targets:
+  PhotoStyles:
+    type: application
+    platform: iOS
+    sources: [Sources]
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Photo Styles
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        NSCameraUsageDescription: Dùng camera để chụp ảnh với Photographic Styles
+        NSPhotoLibraryAddUsageDescription: Lưu ảnh đã chụp vào thư viện
+        CADisableMinimumFrameDurationOnPhone: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.anhkhoa.photostyles
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
