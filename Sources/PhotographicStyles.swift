@@ -812,3 +812,99 @@ final class StyleCamera: NSObject, ObservableObject {
         }
     }
 }
+
+// Conform to AVCapture delegates
+extension StyleCamera: AVCaptureVideoDataOutputSampleBufferDelegate {
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        preview?.render(buffer)
+    }
+}
+
+extension StyleCamera: AVCapturePhotoCaptureDelegate {
+    func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
+        // Placeholder: handle captured photo if needed
+    }
+}
+
+
+final class StyleCamera: NSObject, ObservableObject {
+    let engine = StyleEngine()
+    weak var preview: PreviewRenderer?
+
+    private let session = AVCaptureSession()
+    private let videoOutput = AVCaptureVideoDataOutput()
+    private let photoOutput = AVCapturePhotoOutput()
+    private let sessionQueue = DispatchQueue(label: "style.session")
+    private let videoQueue = DispatchQueue(label: "style.video", qos: .userInitiated)
+    private let processQueue = DispatchQueue(label: "style.process", qos: .userInitiated)
+    private static let stillContext = CIContext(options: [.cacheIntermediates: false])
+    private var configured = false
+    private var pending: [Int64: StyleParams] = [:]
+    private let pendingLock = NSLock()
+
+    func start() {
+        AVCaptureDevice.requestAccess(for: .video) { [weak self] ok in
+            guard ok, let self = self else { return }
+            self.sessionQueue.async {
+                self.configure()
+                if !self.session.isRunning { self.session.startRunning() }
+            }
+        }
+    }
+
+    func stop() {
+        sessionQueue.async { [weak self] in
+            if self?.session.isRunning == true { self?.session.stopRunning() }
+        }
+    }
+
+    private static func portrait(_ c: AVCaptureConnection) {
+        if #available(iOS 17.0, *) {
+            if c.isVideoRotationAngleSupported(90) { c.videoRotationAngle = 90 }
+        } else if c.isVideoOrientationSupported {
+            c.videoOrientation = .portrait
+        }
+    }
+
+    private func configure() {
+        guard !configured else { return }
+        session.beginConfiguration()
+        session.sessionPreset = .photo
+        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
+              let input = try? AVCaptureDeviceInput(device: device),
+              session.canAddInput(input) else {
+            session.commitConfiguration()
+            return
+        }
+        session.addInput(input)
+
+        videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+        videoOutput.alwaysDiscardsLateVideoFrames = true
+        videoOutput.setSampleBufferDelegate(self, queue: videoQueue)
+        if session.canAddOutput(videoOutput) { session.addOutput(videoOutput) }
+        if session.canAddOutput(photoOutput) {
+            session.addOutput(photoOutput)
+            photoOutput.maxPhotoQualityPrioritization = .quality
+        }
+        if let c = videoOutput.connection(with: .video) { Self.portrait(c) }
+        session.commitConfiguration()
+        configured = true
+    }
+
+    func capture() {
+        let params = engine.currentParams
+        sessionQueue.async { [weak self] in
+            guard let self = self, self.session.isRunning else { return }
+            let settings = self.photoOutput.availablePhotoCodecTypes.contains(.hevc)
+                ? AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
+                : AVCapturePhotoSettings()
+            settings.photoQualityPrioritization = .quality
+            if let c = self.photoOutput.connection(with: .video) { Self.portrait(c) }
+            self.pendingLock.lock()
+            self.pending[settings.uniqueID] = params
+            self.pendingLock.unlock()
+            self.photoOutput.capturePhoto(with: settings, delegate: self)
+        }
+    }
+}
